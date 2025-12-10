@@ -1,46 +1,89 @@
-import fetch from "node-fetch";
+// api/spotify.js
 
-const client_id = process.env.SPOTIFY_CLIENT_ID;
-const client_secret = process.env.SPOTIFY_CLIENT_SECRET;
-const refresh_token = process.env.SPOTIFY_REFRESH_TOKEN;
+const clientId = process.env.SPOTIFY_CLIENT_ID;
+const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
+const refreshToken = process.env.SPOTIFY_REFRESH_TOKEN;
 
-const basic = Buffer.from(`${client_id}:${client_secret}`).toString("base64");
-const TOKEN_ENDPOINT = `https://accounts.spotify.com/api/token`;
-const NOW_PLAYING_ENDPOINT = `https://api.spotify.com/v1/me/player/currently-playing`;
+async function getAccessToken() {
+  const basic = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
-const getAccessToken = async () => {
-  const response = await fetch(TOKEN_ENDPOINT, {
+  const response = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
-    body: `grant_type=refresh_token&refresh_token=${refresh_token}`,
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+    }),
   });
 
-  return response.json();
-};
-
-export default async function handler(req, res) {
-  const { access_token } = await getAccessToken();
-
-  const response = await fetch(NOW_PLAYING_ENDPOINT, {
-    headers: {
-      Authorization: `Bearer ${access_token}`,
-    },
-  });
-
-  if (response.status === 204 || response.status > 400) {
-    return res.status(200).json({ isPlaying: false });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error("Failed to get access token: " + errorText);
   }
 
-  const song = await response.json();
+  const data = await response.json();
+  return data.access_token;
+}
 
-  res.status(200).json({
-    isPlaying: song.is_playing,
-    title: song.item.name,
-    artist: song.item.artists.map((a) => a.name).join(", "),
-    albumArt: song.item.album.images[0].url,
-    url: song.item.external_urls.spotify,
-  });
+async function getNowPlaying(accessToken) {
+  const response = await fetch(
+    "https://api.spotify.com/v1/me/player/currently-playing",
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  // 204 = nothing is playing
+  if (response.status === 204 || response.status === 202) {
+    return { isPlaying: false };
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error("Failed to get currently playing: " + errorText);
+  }
+
+  const data = await response.json();
+
+  if (!data || !data.item) {
+    return { isPlaying: false };
+  }
+
+  const item = data.item;
+
+  return {
+    isPlaying: data.is_playing,
+    title: item.name,
+    artist: item.artists.map((a) => a.name).join(", "),
+    album: item.album.name,
+    albumArt: item.album.images?.[0]?.url ?? null,
+    url: item.external_urls?.spotify ?? null,
+  };
+}
+
+export default async function handler(req, res) {
+  try {
+    if (!clientId || !clientSecret || !refreshToken) {
+      return res.status(500).json({
+        error: "Missing Spotify env vars",
+      });
+    }
+
+    const accessToken = await getAccessToken();
+    const nowPlaying = await getNowPlaying(accessToken);
+
+    res.setHeader("Access-Control-Allow-Origin", "*"); // so Framer can call it
+    return res.status(200).json(nowPlaying);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: "Internal server error",
+      message: err.message,
+    });
+  }
 }
